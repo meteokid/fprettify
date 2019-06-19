@@ -665,7 +665,7 @@ def format_single_fline(f_line, whitespace, whitespace_dict, linebreak_pos,
     separating whitespace characters before ampersand (`ampersand_sep`).
     `filename` and `line_nr` just for error messages.
     The higher `whitespace`, the more white space characters inserted -
-    whitespace = 0, 1, 2, 3 are currently supported.
+    whitespace = 0, 1, 2, 3, 4 are currently supported.
     whitespace formatting can additionally controlled more fine-grained
     via a dictionary of bools (whitespace_dict)
     auto formatting can be turned off by setting `auto_format` to False.
@@ -681,19 +681,20 @@ def format_single_fline(f_line, whitespace, whitespace_dict, linebreak_pos,
             'multdiv': 5,         # 5: arithm. operators multiply and divide
             'print': 6,           # 6: print / read statements
             'type': 7,            # 7: select type components
-            'intrinsics': 8       # 8: intrinsics
+            'intrinsics': 8,      # 8: intrinsics
+            'unary': 9            # 9: unary (.not. ...)
             }
 
     if whitespace == 0:
-        spacey = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+        spacey = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     elif whitespace == 1:
-        spacey = [1, 1, 1, 1, 0, 0, 1, 0, 1]
+        spacey = [1, 1, 1, 1, 0, 0, 1, 0, 1, 1]
     elif whitespace == 2:
-        spacey = [1, 1, 1, 1, 1, 0, 1, 0, 1]
+        spacey = [1, 1, 1, 1, 1, 0, 1, 0, 1, 1]
     elif whitespace == 3:
-        spacey = [1, 1, 1, 1, 1, 1, 1, 0, 1]
+        spacey = [1, 1, 1, 1, 1, 1, 1, 0, 1, 1]
     elif whitespace == 4:
-        spacey = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+        spacey = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     else:
         raise NotImplementedError("unknown value for whitespace")
 
@@ -852,6 +853,8 @@ def add_whitespace_charwise(line, spacey, filename, line_nr,
             if ((spacey[0] < 0 and re.match(r'\s+[,;]', rhs)) or
                 (spacey[5] < 0 and re.match(r'\s+[/\*][^/\*]?', rhs))):
                 rhs1 = rhs
+            if spacey[9] == 0 and char == '(' and re.search(r'\.not\.\s*$', lhs, RE_FLAGS):
+                sep1 = 0
             line_ftd = lhs.rstrip(' ') + ' ' * sep1 + \
                 delim + ' ' * sep2 + rhs1
 
@@ -892,7 +895,7 @@ def add_whitespace_charwise(line, spacey, filename, line_nr,
             lhs = line_ftd[:pos + offset]
             rhs = line_ftd[pos + 5 + offset:]
             line_ftd = lhs.rstrip(
-                ' ') + line[pos:pos + 5] + ' ' * spacey[3] + rhs.lstrip(' ')
+                ' ') + line[pos:pos + 5] + ' ' * spacey[9] + rhs.lstrip(' ')
 
         # strip whitespaces from '=' and prepare assignment operator
         # formatting:
@@ -1573,6 +1576,8 @@ def run(argv=sys.argv):  # pragma: no cover
             help="boolean, en-/disable whitespace for relational operators")
     parser.add_argument("--whitespace-logical", type=str2mode, nargs="?", default="None", const=True,
             help="boolean, en-/disable whitespace for logical operators")
+    parser.add_argument("--whitespace-unary", type=str2mode, nargs="?", default="None", const=True,
+            help="boolean, en-/disable rhs whitespace for unary operators")
     parser.add_argument("--whitespace-plusminus", type=str2mode, nargs="?", default="None", const=True,
             help="True/False/0or1/asis/r_0or1/r_asis, en-/disable whitespace for plus/minus arithmetic")
     parser.add_argument("--whitespace-multdiv", type=str2mode, nargs="?", default="None", const=True,
@@ -1619,6 +1624,7 @@ def run(argv=sys.argv):  # pragma: no cover
     ws_dict['print'] = args.whitespace_print
     ws_dict['type'] = args.whitespace_type
     ws_dict['intrinsics'] = args.whitespace_intrinsics
+    ws_dict['unary'] = args.whitespace_unary
 
     ws_dict['lhs_re'], ws_dict['rhs_re'], ws_dict['lhs_w_re'], ws_dict['rhs_w_re'] = get_whitespace_re(ws_dict)
 
