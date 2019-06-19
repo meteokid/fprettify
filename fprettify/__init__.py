@@ -186,10 +186,14 @@ LINEBREAK_STR = r"(&)[\s]*(?:!.*)?$"
 # Note: +/- in real literals and sign operator is ignored
 PLUSMINUS_RE = re.compile(
     r"(?<=[\w\)\]])(?<![\d\.][de])\s*(\+|-)\s*", RE_FLAGS)
+PLUSMINUS_W_RE = re.compile(
+    r"(?<=[\w\)\]])(?<![\d\.][de])(\s*\+\s*|\s*-\s*)", RE_FLAGS)
 # Note: ** or // (or any multiples of * or /) are ignored
 #       we also ignore any * or / before a :: because we may be seeing 'real*8'
 MULTDIV_RE = re.compile(
     r"(?<=[\w\)\]])\s*((?<!\*)\*(?!\*)|(?<!/)/(?!/))(?=[\s\w\(])(?!.*::)", RE_FLAGS)
+MULTDIV_W_RE = re.compile(
+    r"(?<=[\w\)\]])(\s*(?<!\*)\*(?!\*)|\s*(?<!/)/(?!/))(?=[\s\w\(])(?!.*::)", RE_FLAGS)
 REL_OP_RE = re.compile(
     r"(?<!\()\s*(\.(?:EQ|NE|LT|LE|GT|GE)\.|(?:==|\/=|<(?!=)|<=|(?<!=)>(?!=)|>=))\s*(?!\))",
     RE_FLAGS)
@@ -204,9 +208,6 @@ DEL_CLOSE_RE = re.compile(r"^" + DEL_CLOSE_STR, RE_FLAGS)
 
 # empty line regex
 EMPTY_RE = re.compile(SOL_STR + r"$", RE_FLAGS)
-
-# two-sided operators
-LR_OPS_RE = [REL_OP_RE, LOG_OP_RE, PLUSMINUS_RE, MULTDIV_RE, PRINT_RE]
 
 USE_RE = re.compile(
     SOL_STR + "USE(\s+|(,.+?)?::\s*)\w+?((,.+?=>.+?)+|,\s*only\s*:.+?)?$" + EOL_STR, RE_FLAGS)
@@ -227,6 +228,11 @@ NML_RE = re.compile(r"(/\w+/)", RE_FLAGS)
 # find namelists and data statements
 NML_STMT_RE = re.compile(SOL_STR + r"NAMELIST.*/.*/", RE_FLAGS)
 DATA_STMT_RE = re.compile(SOL_STR + r"DATA\s+\w", RE_FLAGS)
+
+KEEP_W_ASIS = 'asis'
+KEEP_W_0OR1 = '0or1'
+KEEP_WR_ASIS = 'r_asis'
+KEEP_WR_0OR1 = 'r_0or1'
 
 ## Regexp for f90 keywords'
 F90_KEYWORDS_RE = re.compile(r"\b(" + "|".join((
@@ -901,7 +907,7 @@ def format_single_fline(f_line, whitespace, whitespace_dict, linebreak_pos,
     separating whitespace characters before ampersand (`ampersand_sep`).
     `filename` and `line_nr` just for error messages.
     The higher `whitespace`, the more white space characters inserted -
-    whitespace = 0, 1, 2, 3 are currently supported.
+    whitespace = 0, 1, 2, 3, 4 are currently supported.
     whitespace formatting can additionally controlled more fine-grained
     via a dictionary of bools (whitespace_dict)
     auto formatting can be turned off by setting `auto_format` to False.
@@ -917,19 +923,20 @@ def format_single_fline(f_line, whitespace, whitespace_dict, linebreak_pos,
             'multdiv': 5,         # 5: arithm. operators multiply and divide
             'print': 6,           # 6: print / read statements
             'type': 7,            # 7: select type components
-            'intrinsics': 8       # 8: intrinsics
+            'intrinsics': 8,      # 8: intrinsics
+            'unary': 9            # 9: unary (.not. ...)
             }
 
     if whitespace == 0:
-        spacey = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+        spacey = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     elif whitespace == 1:
-        spacey = [1, 1, 1, 1, 0, 0, 1, 0, 1]
+        spacey = [1, 1, 1, 1, 0, 0, 1, 0, 1, 1]
     elif whitespace == 2:
-        spacey = [1, 1, 1, 1, 1, 0, 1, 0, 1]
+        spacey = [1, 1, 1, 1, 1, 0, 1, 0, 1, 1]
     elif whitespace == 3:
-        spacey = [1, 1, 1, 1, 1, 1, 1, 0, 1]
+        spacey = [1, 1, 1, 1, 1, 1, 1, 0, 1, 1]
     elif whitespace == 4:
-        spacey = [1, 1, 1, 1, 1, 1, 1, 1, 1]
+        spacey = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     else:
         raise NotImplementedError("unknown value for whitespace")
 
@@ -940,14 +947,20 @@ def format_single_fline(f_line, whitespace, whitespace_dict, linebreak_pos,
                 spacey[value] = 1
             elif whitespace_dict[key] == False:
                 spacey[value] = 0
+            if key in ['comma', 'plusminus', 'multdiv']:
+                if whitespace_dict[key] == KEEP_W_ASIS:
+                    spacey[value] = -2
+                elif whitespace_dict[key] == KEEP_W_0OR1:
+                    spacey[value] = -1
 
     line = f_line
     line_orig = line
 
     if auto_format:
 
-        line = rm_extra_whitespace(line)
-        line = add_whitespace_charwise(line, spacey, filename, line_nr)
+        line = rm_extra_whitespace(line, whitespace_dict)
+        line = add_whitespace_charwise(line, spacey, filename, line_nr,
+                                       whitespace_dict)
         line = add_whitespace_context(line, spacey)
 
     lines_out = split_reformatted_line(
@@ -955,11 +968,20 @@ def format_single_fline(f_line, whitespace, whitespace_dict, linebreak_pos,
     return lines_out
 
 
-def rm_extra_whitespace(line):
+def rm_extra_whitespace(line, whitespace_dict=None):
     """rm all unneeded whitespace chars, except for declarations"""
     line_ftd = ''
     pos_prev = -1
     pos = -1
+
+    try:
+        lhs_re = whitespace_dict['lhs_re']
+        rhs_re = whitespace_dict['rhs_re']
+        lhs_w_re = whitespace_dict['lhs_w_re']
+        rhs_w_re = whitespace_dict['rhs_w_re']
+    except KeyError:
+        lhs_re, rhs_re, lhs_w_re, rhs_w_re = None, None, None, None
+
     for pos, char in CharFilter(line):
         is_decl = line[pos:].lstrip().startswith('::') or line[
             :pos].rstrip().endswith('::')
@@ -969,11 +991,16 @@ def rm_extra_whitespace(line):
 
         if char == ' ':
             # remove double spaces:
-            if line_ftd and (re.search(r'[\w]', line_ftd[-1]) or is_decl):
+            if line_ftd and (re.search(r'[\w]', line_ftd[-1]) or is_decl or
+                             (lhs_re and re.match(lhs_w_re, line[pos:])) or
+                             (rhs_re and re.search(rhs_re, line_ftd))):
                 line_ftd = line_ftd + char
         else:
             if (line_ftd and line_ftd[-1] == ' ' and
-                    (not re.search(r'[\w]', char) and not is_decl)):
+                    (not re.search(r'[\w]', char) and not is_decl and
+                     not ((lhs_re and re.match(lhs_re, line[pos:])) or
+                          (rhs_re and re.search(rhs_w_re, line_ftd)))
+                     )):
                 line_ftd = line_ftd[:-1]  # remove spaces except between words
             line_ftd = line_ftd + char
         pos_prev = pos
@@ -982,12 +1009,19 @@ def rm_extra_whitespace(line):
     return line_ftd
 
 
-def add_whitespace_charwise(line, spacey, filename, line_nr):
+def add_whitespace_charwise(line, spacey, filename, line_nr,
+                            whitespace_dict=None):
     """add whitespace character wise (no need for context aware parsing)"""
     line_ftd = line
     pos_eq = []
     end_of_delim = -1
     level = 0
+
+    try:
+        w_comma = whitespace_dict['comma']
+    except KeyError:
+        w_comma = None
+
     for pos, char in CharFilter(line):
         # offset w.r.t. unformatted line
         offset = len(line_ftd) - len(line)
@@ -1047,25 +1081,44 @@ def add_whitespace_charwise(line, spacey, filename, line_nr):
 
                 # add separating whitespace after closing delimiter
                 # with some exceptions:
-                if not re.search(r"^\s*(" + DEL_CLOSE_STR + r"|[,%:/\*])",
+                if not re.search(r"^\s*(" + DEL_CLOSE_STR + r"|[,%:/\*\+\-])",
                                  line[pos + 1:], RE_FLAGS):
                     sep2 = 1
                 elif re.search(r"^\s*::", line[pos + 1:], RE_FLAGS):
                     sep2 = len(rhs) - len(rhs.lstrip(' '))
-
+                elif re.search(r"^\s*[\+\-]", line[pos + 1:], RE_FLAGS):
+                    sep2 = len(rhs) - len(rhs.lstrip(' '))
             # where delimiter token ends
             end_of_delim = pos + len(delim) - 1
 
+            rhs1 = rhs.lstrip(' ')
+            if ((spacey[0] < 0 and re.match(r'\s+[,;]', rhs)) or
+                (spacey[5] < 0 and re.match(r'\s+[/\*][^/\*]?', rhs))):
+                rhs1 = rhs
+            if spacey[9] == 0 and char == '(' and re.search(r'\.not\.\s*$', lhs, RE_FLAGS):
+                sep1 = 0
             line_ftd = lhs.rstrip(' ') + ' ' * sep1 + \
-                delim + ' ' * sep2 + rhs.lstrip(' ')
+                delim + ' ' * sep2 + rhs1
 
         # format commas and semicolons
         if char in [',', ';']:
             lhs = line_ftd[:pos + offset]
             rhs = line_ftd[pos + 1 + offset:]
-            line_ftd = lhs.rstrip(' ') + char + ' ' * \
-                spacey[0] + rhs.lstrip(' ')
-            line_ftd = line_ftd.rstrip(' ')
+            if w_comma in [KEEP_W_ASIS, KEEP_W_0OR1]:
+                lhs1 = lhs
+                if w_comma == KEEP_W_0OR1:
+                    lhs1 = re.sub(r'\s+$', ' ', lhs)
+                line_ftd = lhs1 + char + rhs
+                ## line_ftd = line_ftd.rstrip(' ')
+            elif w_comma in [KEEP_WR_ASIS, KEEP_WR_0OR1]:
+                lhs1 = lhs.rstrip(' ')
+                line_ftd = lhs1 + char + rhs
+                ## line_ftd = line_ftd.rstrip(' ')
+            else:
+                lhs1 = lhs.rstrip(' ')
+                rhs1 = rhs.lstrip(' ')
+                line_ftd = lhs1 + char + ' ' * spacey[0] + rhs1
+                line_ftd = line_ftd.rstrip(' ')
 
         # format type selector %
         if char == "%":
@@ -1078,12 +1131,13 @@ def add_whitespace_charwise(line, spacey, filename, line_nr):
                     + rhs.lstrip(' ')
             line_ftd = line_ftd.rstrip(' ')
 
+        #TODO: option for no space after unary operators
         # format .NOT.
         if re.search(r"^\.NOT\.", line[pos:pos + 5], RE_FLAGS):
             lhs = line_ftd[:pos + offset]
             rhs = line_ftd[pos + 5 + offset:]
             line_ftd = lhs.rstrip(
-                ' ') + line[pos:pos + 5] + ' ' * spacey[3] + rhs.lstrip(' ')
+                ' ') + line[pos:pos + 5] + ' ' * spacey[9] + rhs.lstrip(' ')
 
         # strip whitespaces from '=' and prepare assignment operator
         # formatting:
@@ -1122,7 +1176,6 @@ def add_whitespace_context(line, spacey):
     not comments or strings in order to be able to apply a context aware regex.
     """
 
-
     pos_prev = -1
     pos = -1
     line_parts = ['']
@@ -1147,6 +1200,11 @@ def add_whitespace_context(line, spacey):
                 line_parts[pos] = (' '.join(partsplit))
 
     # Two-sided operators
+    LR_OPS_RE = [REL_OP_RE, LOG_OP_RE, PLUSMINUS_RE, MULTDIV_RE, PRINT_RE]
+    if spacey[2 + 2] < 0:
+        LR_OPS_RE[2] = PLUSMINUS_W_RE
+    if spacey[3 + 2] < 0:
+        LR_OPS_RE[3] = MULTDIV_W_RE
     for n_op, lr_re in enumerate(LR_OPS_RE):
         for pos, part in enumerate(line_parts):
             # exclude comments, strings:
@@ -1154,7 +1212,21 @@ def add_whitespace_context(line, spacey):
                 # also exclude / if we see a namelist and data statement
                 if not ( NML_STMT_RE.match(line) or DATA_STMT_RE.match(line) ):
                     partsplit = lr_re.split(part)
-                    line_parts[pos] = (' ' * spacey[n_op + 2]).join(partsplit)
+                    if spacey[n_op + 2] < -1:
+                        line_parts[pos] = ''.join(partsplit)
+                    elif spacey[n_op + 2] == -1:
+                        lr2_re = None
+                        if n_op == 2:
+                            lr2_re = r'\s*[+-]\s*'
+                        elif n_op == 3:
+                            lr2_re = r'\s*[/\*]\s*'
+                        if lr2_re:
+                            partsplit = [re.sub(r'\s\s+', ' ', a)
+                                         if re.search(lr2_re, a, flags=RE_FLAGS)
+                                         else a for a in partsplit]
+                        line_parts[pos] = ''.join(partsplit)
+                    else:
+                        line_parts[pos] = (' ' * spacey[n_op + 2]).join(partsplit)
 
     line = ''.join(line_parts)
 
@@ -1664,6 +1736,36 @@ def log_message(message, level, filename, line_nr):
     logger_to_use(message, extra=logger_d)
 
 
+def get_whitespace_re(whitespace_dict):
+    """ """
+    mapping = {
+            'comma': r'[,;]',
+            'assignments': r'=',
+            ## 'relational': r'',
+            ## 'logical': r'',
+            'plusminus': r'[+-]',
+            'multdiv': r'[\*/]'
+            }
+    l_asis = []
+    for k,v in mapping.items():
+        try:
+            if whitespace_dict[k] == KEEP_W_ASIS:
+                l_asis += [(r'\s*' + v, v + r'\s*$', r'\s*' + v, v + r'\s*$')]
+            elif whitespace_dict[k] == KEEP_W_0OR1:
+                l_asis += [(v, v + r'$', r'\s?' + v, v + r'\s?$')]
+            elif whitespace_dict[k] == KEEP_WR_ASIS:
+                l_asis += [(None, v + r'\s*$', None, v + r'\s*$')]
+            elif whitespace_dict[k] == KEEP_WR_0OR1:
+                l_asis += [(None, v + r'$', None, v + r'\s?$')]
+        except KeyError:
+            pass
+    lre = []
+    for n in range(4):
+        l = [a[n] for a in l_asis if a[n]]
+        lre.append(re.compile('(' + '|'.join(l) + ')', RE_FLAGS) if l else None)
+    return lre
+
+
 def run(argv=sys.argv):  # pragma: no cover
     """Command line interface"""
 
@@ -1680,6 +1782,17 @@ def run(argv=sys.argv):  # pragma: no cover
             return False
         else:
             return None
+
+    def str2mode(str):
+        """helper function to convert strings to bool"""
+        if str.lower() in ('yes', 'true', 't', 'y', '1'):
+            return True
+        elif str.lower() in ('no', 'false', 'f', 'n', '0'):
+            return False
+        elif str.lower() in ('none'):
+            return None
+        else:
+            return str.lower()
 
     arguments = {'prog': argv[0],
                  'description': 'Auto-format modern Fortran source files.',
@@ -1701,18 +1814,20 @@ def run(argv=sys.argv):  # pragma: no cover
                                                              " | 2: operators, print/read, plus/minus"
                                                              " | 3: operators, print/read, plus/minus, muliply/divide"
                                                              " | 4: operators, print/read, plus/minus, muliply/divide, type component selector")
-    parser.add_argument("--whitespace-comma", type=str2bool, nargs="?", default="None", const=True,
-            help="boolean, en-/disable whitespace for comma/semicolons")
-    parser.add_argument("--whitespace-assignment", type=str2bool, nargs="?", default="None", const=True,
+    parser.add_argument("--whitespace-comma", type=str2mode, nargs="?", default="None", const=True,
+            help="True/False/0or1/asis/r_0or1/r_asis, en-/disable whitespace for comma/semicolons")
+    parser.add_argument("--whitespace-assignment", type=str2mode, nargs="?", default="None", const=True,
             help="boolean, en-/disable whitespace for assignments")
-    parser.add_argument("--whitespace-relational", type=str2bool, nargs="?", default="None", const=True,
+    parser.add_argument("--whitespace-relational", type=str2mode, nargs="?", default="None", const=True,
             help="boolean, en-/disable whitespace for relational operators")
-    parser.add_argument("--whitespace-logical", type=str2bool, nargs="?", default="None", const=True,
+    parser.add_argument("--whitespace-logical", type=str2mode, nargs="?", default="None", const=True,
             help="boolean, en-/disable whitespace for logical operators")
-    parser.add_argument("--whitespace-plusminus", type=str2bool, nargs="?", default="None", const=True,
-            help="boolean, en-/disable whitespace for plus/minus arithmetic")
-    parser.add_argument("--whitespace-multdiv", type=str2bool, nargs="?", default="None", const=True,
-            help="boolean, en-/disable whitespace for multiply/divide arithmetic")
+    parser.add_argument("--whitespace-unary", type=str2mode, nargs="?", default="None", const=True,
+            help="boolean, en-/disable rhs whitespace for unary operators")
+    parser.add_argument("--whitespace-plusminus", type=str2mode, nargs="?", default="None", const=True,
+            help="True/False/0or1/asis/r_0or1/r_asis, en-/disable whitespace for plus/minus arithmetic")
+    parser.add_argument("--whitespace-multdiv", type=str2mode, nargs="?", default="None", const=True,
+            help="True/False/0or1/asis/r_0or1/r_asis, en-/disable whitespace for multiply/divide arithmetic")
     parser.add_argument("--whitespace-print", type=str2bool, nargs="?", default="None", const=True,
             help="boolean, en-/disable whitespace for print/read statements")
     parser.add_argument("--whitespace-type", type=str2bool, nargs="?", default="None", const=True,
@@ -1757,6 +1872,9 @@ def run(argv=sys.argv):  # pragma: no cover
     ws_dict['print'] = args.whitespace_print
     ws_dict['type'] = args.whitespace_type
     ws_dict['intrinsics'] = args.whitespace_intrinsics
+    ws_dict['unary'] = args.whitespace_unary
+
+    ws_dict['lhs_re'], ws_dict['rhs_re'], ws_dict['lhs_w_re'], ws_dict['rhs_w_re'] = get_whitespace_re(ws_dict)
 
     # build swap case dictionary, could add option to select case
     SWAP_TO_LOWER = True
