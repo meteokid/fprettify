@@ -234,13 +234,15 @@ class F90Indenter(object):
     and updates the indentation.
     """
 
-    def __init__(self, first_indent, rel_indent, filename):
+    def __init__(self, first_indent, rel_indent, reset_indent, filename):
         # scopes / subunits:
         self._scope_storage = []
         # indents for all fortran lines:
         self._indent_storage = []
         # indents of actual lines of current fortran line
         self._line_indents = []
+
+        self.reset_indent = reset_indent
 
         self._filename = filename
         self._aligner = F90Aligner(filename)
@@ -274,6 +276,11 @@ class F90Indenter(object):
         :manual_lines_indent: don't use F90Aligner but manually impose
                               indents for continuations
         """
+
+        if (self._initial and self.reset_indent and
+            (PROG_RE.match(f_line) or MOD_RE.match(f_line) or
+             SUBR_RE.match(f_line) or FCT_RE.match(f_line))):
+            self._indent_storage[-1] = 0
 
         self._line_indents = [0] * len(lines)
         br_indent_list = [0] * len(lines)
@@ -1006,7 +1013,7 @@ def reformat_inplace(filename, stdout=False, **kwargs):  # pragma: no cover
             outfile.write(newfile.getvalue())
 
 
-def reformat_ffile(infile, outfile, impose_indent=True, indent_size=3, strict_indent=False, impose_whitespace=True,
+def reformat_ffile(infile, outfile, impose_indent=True, indent_size=3, reset_indent=False, strict_indent=False, impose_whitespace=True,
                    impose_replacements=False, cstyle=False, whitespace=2, whitespace_dict={}, llength=132,
                    strip_comments=False, orig_filename=None):
     """main method to be invoked for formatting a Fortran file."""
@@ -1029,7 +1036,7 @@ def reformat_ffile(infile, outfile, impose_indent=True, indent_size=3, strict_in
     indent_special = 0
 
     if impose_indent:
-        indenter = F90Indenter(first_indent, indent_size, orig_filename)
+        indenter = F90Indenter(first_indent, indent_size, reset_indent, orig_filename)
     else:
         indent_special = 3
 
@@ -1473,6 +1480,8 @@ def run(argv=sys.argv):  # pragma: no cover
             help="boolean, en-/disable whitespace for select type components")
     parser.add_argument("--whitespace-intrinsics", type=str2bool, nargs="?", default="None", const=True,
             help="boolean, en-/disable whitespace for intrinsics like if/write/close")
+    parser.add_argument("--reset-indent", action='store_true', default=False,
+                        help="Reset indent to 0 at the begining of a file if match program/module/sub/func")
     parser.add_argument("--strict-indent", action='store_true', default=False, help="strictly impose indentation even for nested loops")
     parser.add_argument("--disable-indent", action='store_true', default=False, help="don't impose indentation")
     parser.add_argument("--disable-whitespace", action='store_true', default=False, help="don't impose whitespace formatting")
@@ -1557,6 +1566,7 @@ def run(argv=sys.argv):  # pragma: no cover
                                  stdout=stdout,
                                  impose_indent=not args.disable_indent,
                                  indent_size=args.indent,
+                                 reset_indent=args.reset_indent,
                                  strict_indent=args.strict_indent,
                                  impose_whitespace=not args.disable_whitespace,
                                  impose_replacements=args.enable_replacements,
